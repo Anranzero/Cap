@@ -100,7 +100,9 @@ fn open(
     let width = width.min(work.right - work.left);
     let height = height.min(work.bottom - work.top);
     let last_theme = settings.borrow().theme;
-    runtime::create(
+    // Result windows must reach the foreground: a plain show can stay behind the
+    // settings window, and a later taskbar click then raises the wrong window.
+    let window = runtime::create(
         Box::new(Preview {
             path,
             bytes,
@@ -127,7 +129,11 @@ fn open(
             owner: None,
             visible: true,
         },
-    )
+    )?;
+    unsafe {
+        let _ = SetForegroundWindow(window);
+    }
+    Ok(window)
 }
 
 struct PlaybackClock {

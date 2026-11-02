@@ -27,6 +27,32 @@ internal static class Ui
             brand = new BitmapImage(new Uri("pack://application:,,,/cap;component/Assets/cap.png")); brand.Freeze(); return brand;
         }
     }
+    /// <summary>
+    /// Shows a result window and brings it to the foreground. Windows blocks plain
+    /// Activate() for background processes, so the preview could open behind the
+    /// settings window and a later taskbar click would raise the wrong window.
+    /// </summary>
+    public static void ShowForeground(Window window)
+    {
+        window.Show();
+        window.Activate();
+        try
+        {
+            window.Topmost = true;
+            window.Topmost = false;
+            nint handle = new WindowInteropHelper(window).Handle;
+            if (handle != 0) SetForegroundWindow(handle);
+        }
+        catch (InvalidOperationException)
+        {
+            // The window was closed between Show and activation; nothing to do.
+        }
+    }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool SetForegroundWindow(nint hwnd);
+
     public static void PrepareWindow(Window window)
     {
         window.SetResourceReference(Window.BackgroundProperty, "WindowBrush");

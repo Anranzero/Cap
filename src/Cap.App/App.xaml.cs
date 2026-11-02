@@ -227,7 +227,7 @@ public partial class App : Application
             if (tray != null) tray.Text = "cap · 正在保存录制…";
             var result = await recording.StopAsync();
             controls?.CloseAfterStop(); controls = null;
-            if (!exiting) { preview = new PreviewWindow(result); preview.Show(); }
+            if (!exiting) { preview = new PreviewWindow(result); _ = preview.Dispatcher.BeginInvoke(() => Ui.ShowForeground(preview)); }
         }
         catch (Exception ex) { Ui.Error(controls, ex); }
         finally
@@ -305,7 +305,7 @@ public partial class App : Application
             recoveryCancellation = new CancellationTokenSource();
             recoveryTask = RecordingRecovery.RecoverAsync(picker.FileName, output, recoveryCancellation.Token);
             var result = await recoveryTask;
-            if (!exiting) new PreviewWindow(result).Show();
+            if (!exiting) Ui.ShowForeground(new PreviewWindow(result));
         }
         catch (OperationCanceledException) { if (!exiting) Notify("恢复已取消", "原始恢复日志已保留。"); }
         catch (Exception ex) { if (!exiting) Ui.Error(null, ex); else AppLog.Error(ex); }
