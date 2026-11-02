@@ -37,10 +37,9 @@ pub struct JournalHeader {
     pub format: RecordingFormat,
 }
 pub struct JournalWriter {
-    file: File,
+    tx: Option<std::sync::mpsc::SyncSender<(Vec<u8>, i64, i64)>>,
+    worker: Option<std::thread::JoinHandle<Result<(), String>>>,
     header: JournalHeader,
-    path: PathBuf,
-    last_flush: std::time::Instant,
     last_end: i64,
 }
 pub struct JournalReader {
@@ -277,11 +276,52 @@ impl JournalWriter {
             .and_then(|_| file.write_all(&json))
             .and_then(|_| file.sync_all())
             .map_err(|e| format!("Writing recovery journal header: {e}"))?;
+        let (tx, rx) = std::sync::mpsc::sync_channel::<(Vec<u8>, i64, i64)>(2);
+        let journal_path = path.to_path_buf();
+        let worker = std::thread::Builder::new()
+            .name("cap-journal".into())
+            .spawn(move || -> Result<(), String> {
+                let mut file = file;
+                let mut last_flush = std::time::Instant::now();
+                for (pixels, time, duration) in rx {
+                    let mut deflater =
+                        flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::fast());
+                    deflater
+                        .write_all(&pixels)
+                        .map_err(|e| format!("Compressing recovery pixels: {e}"))?;
+                    let compressed = deflater
+                        .finish()
+                        .map_err(|e| format!("Completing recovery compression: {e}"))?;
+                    let length = i32::try_from(compressed.len())
+                        .map_err(|_| "Recovery compressed frame is too large")?;
+                    file.write_all(&length.to_le_bytes())
+                        .and_then(|_| file.write_all(&time.to_le_bytes()))
+                        .and_then(|_| file.write_all(&duration.to_le_bytes()))
+                        .and_then(|_| file.write_all(&compressed))
+                        .and_then(|_| file.write_all(&0xca91f00du32.to_le_bytes()))
+                        .map_err(|e| format!("Writing recovery frame: {e}"))?;
+                    if last_flush.elapsed() >= std::time::Duration::from_secs(1) {
+                        file.flush()
+                            .and_then(|_| file.sync_all())
+                            .map_err(|e| format!("Flushing recovery frames: {e}"))?;
+                        last_flush = std::time::Instant::now();
+                        check_free_space(
+                            journal_path
+                                .parent()
+                                .filter(|p| !p.as_os_str().is_empty())
+                                .unwrap_or(Path::new(".")),
+                        )?;
+                    }
+                }
+                file.flush()
+                    .and_then(|_| file.sync_all())
+                    .map_err(|e| format!("Flushing committed recovery frames: {e}"))
+            })
+            .map_err(|e| format!("Starting recovery journal thread: {e}"))?;
         Ok(Self {
-            file,
+            tx: Some(tx),
+            worker: Some(worker),
             header,
-            path: path.into(),
-            last_flush: std::time::Instant::now(),
             last_end: 0,
         })
     }
@@ -297,41 +337,23 @@ impl JournalWriter {
         let end = time
             .checked_add(duration)
             .ok_or("Recovery frame duration overflows")?;
-        let mut deflater =
-            flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::fast());
-        deflater
-            .write_all(&frame.pixels)
-            .map_err(|e| format!("Compressing recovery pixels: {e}"))?;
-        let compressed = deflater
-            .finish()
-            .map_err(|e| format!("Completing recovery compression: {e}"))?;
-        let length = i32::try_from(compressed.len())
-            .map_err(|_| "Recovery compressed frame is too large")?;
-        self.file
-            .write_all(&length.to_le_bytes())
-            .and_then(|_| self.file.write_all(&time.to_le_bytes()))
-            .and_then(|_| self.file.write_all(&duration.to_le_bytes()))
-            .and_then(|_| self.file.write_all(&compressed))
-            .and_then(|_| self.file.write_all(&0xca91f00du32.to_le_bytes()))
-            .map_err(|e| format!("Writing recovery frame: {e}"))?;
         self.last_end = end;
-        if self.last_flush.elapsed() >= std::time::Duration::from_secs(1) {
-            self.finish()?;
-            self.last_flush = std::time::Instant::now();
-            check_free_space(
-                self.path
-                    .parent()
-                    .filter(|p| !p.as_os_str().is_empty())
-                    .unwrap_or(Path::new(".")),
-            )?;
+        // Bounded queue: when the writer falls behind we drop recovery frames rather than
+        // stalling the capture loop (the video itself is unaffected).
+        let pixels = frame.pixels.clone();
+        if let Some(tx) = self.tx.as_ref() {
+            let _ = tx.try_send((pixels, time, duration));
         }
         Ok(())
     }
     pub fn finish(&mut self) -> Result<(), String> {
-        self.file
-            .flush()
-            .and_then(|_| self.file.sync_all())
-            .map_err(|e| format!("Flushing committed recovery frames: {e}"))
+        self.tx = None;
+        match self.worker.take() {
+            Some(worker) => worker
+                .join()
+                .map_err(|_| "Recovery journal thread panicked".to_string())?,
+            None => Ok(()),
+        }
     }
 }
 impl JournalReader {
