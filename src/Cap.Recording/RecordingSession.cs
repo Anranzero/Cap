@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -102,6 +103,32 @@ public sealed class RecordingSession : IDisposable
                     if (state == RecordingState.Recording) active.Start();
                 }
                 long nextSlot = 0, pendingSlot = 0, count = 0, dropped = 0, lastProgress = -250;
+                // Optional per-stage profiling (CAP_RECORD_PROFILE=1) for 60 fps tuning.
+                bool profile = Environment.GetEnvironmentVariable("CAP_RECORD_PROFILE") == "1";
+                double captureTicks = 0, processTicks = 0, writeTicks = 0;
+                // Encoding and journal writes overlap the next capture on their own thread;
+                // serialising them was the remaining bottleneck at 1440p60.
+                using var writeQueue = new BlockingCollection<WriteItem>(2);
+                Exception? writeFailure = null;
+                var writer = new Thread(() =>
+                {
+                    try
+                    {
+                        foreach (WriteItem item in writeQueue.GetConsumingEnumerable())
+                        {
+                            long started = profile ? Stopwatch.GetTimestamp() : 0;
+                            WriteFrame(encoder, journal, item.Frame, item.Start, item.End);
+                            if (profile) writeTicks += Stopwatch.GetTimestamp() - started;
+                        }
+                    }
+                    catch (Exception error) { writeFailure = error; }
+                })
+                {
+                    IsBackground = true,
+                    Name = "Cap encoder",
+                    Priority = ThreadPriority.AboveNormal
+                };
+                writer.Start();
                 PixelFrame? pending = null;
                 while (true)
                 {
@@ -124,16 +151,20 @@ public sealed class RecordingSession : IDisposable
                     }
                     PixelFrame captured;
                     PixelRect capturedBounds;
+                    long stageStart = profile ? Stopwatch.GetTimestamp() : 0;
                     try { captured = source.Capture(); capturedBounds = source.Bounds; }
                     catch (CaptureTargetClosedException) when (pending is not null) { break; }
+                    if (profile) { captureTicks += Stopwatch.GetTimestamp() - stageStart; stageStart = Stopwatch.GetTimestamp(); }
                     PixelFrame frame = processor.Process(captured, capturedBounds, width, height);
+                    if (profile) { processTicks += Stopwatch.GetTimestamp() - stageStart; stageStart = Stopwatch.GetTimestamp(); }
                     lock (sync)
                     {
                         if (state != RecordingState.Recording) continue;
                     }
                     if (pending is not null)
                     {
-                        WriteFrame(encoder, journal, pending, pendingSlot, slot);
+                        if (!writeQueue.TryAdd(new WriteItem(pending, pendingSlot, slot), 250))
+                            dropped++;
                         dropped += Math.Max(0, slot - nextSlot);
                     }
                     else slot = 0;
@@ -153,9 +184,18 @@ public sealed class RecordingSession : IDisposable
                 }
                 long finalSlot;
                 lock (sync) finalSlot = Math.Max(pendingSlot + 1, (active.Elapsed.Ticks * options.FramesPerSecond + TimeSpan.TicksPerSecond - 1) / TimeSpan.TicksPerSecond);
-                WriteFrame(encoder, journal, pending, pendingSlot, finalSlot);
+                writeQueue.Add(new WriteItem(pending, pendingSlot, finalSlot));
+                writeQueue.CompleteAdding();
+                writer.Join(TimeSpan.FromSeconds(15));
+                if (writeFailure is not null)
+                    throw new InvalidOperationException("Recording encoder failed: " + writeFailure.Message, writeFailure);
                 encoder.Complete();
                 RaiseProgress(new RecordingProgress(TimeSpan.FromTicks(SlotTime(finalSlot)), count, dropped, source.BackendName));
+                if (profile && count > 0)
+                {
+                    double toMs = 1000.0 / Stopwatch.Frequency / count;
+                    Console.WriteLine($"[profile] frames={count} capture={captureTicks * toMs:F2}ms process={processTicks * toMs:F2}ms write={writeTicks * toMs:F2}ms");
+                }
                 finalResult = new RecordingResult(options.OutputPath, TimeSpan.FromTicks(SlotTime(finalSlot)), count);
             }
             File.Move(partialPath, options.OutputPath, false);
@@ -177,6 +217,8 @@ public sealed class RecordingSession : IDisposable
             lock (sync) if (disposed) DisposeSignal();
         }
     }
+
+    private readonly record struct WriteItem(PixelFrame Frame, long Start, long End);
 
     private RecordingResult? finalResult;
     private long SlotTime(long slot) => checked(slot * TimeSpan.TicksPerSecond / options.FramesPerSecond);

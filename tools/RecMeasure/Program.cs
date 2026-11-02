@@ -1,9 +1,8 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using Cap.Core;
 using Cap.Capture;
 using Cap.Recording;
-using System.Diagnostics.Tracing;
-Trace.Listeners.Add(new ConsoleTraceListener());
 
 string dir = args.Length > 0 ? args[0] : Path.Combine(Path.GetTempPath(), "cap-rec-measure");
 Directory.CreateDirectory(dir);
@@ -19,32 +18,52 @@ if (mode == "capture")
     using var source = CaptureService.CreateSource(new CaptureRequest(bounds, 0, PreferGraphicsCapture: preferWgc));
     var watch = Stopwatch.StartNew();
     int frames = 0;
-    while (watch.Elapsed < TimeSpan.FromSeconds(seconds))
-    {
-        var frame = source.Capture();
-        frames++;
-    }
+    while (watch.Elapsed < TimeSpan.FromSeconds(seconds)) { source.Capture(); frames++; }
     Console.WriteLine($"capture-only backend={source.BackendName} frames={frames} fps={frames / watch.Elapsed.TotalSeconds:F1} msPerFrame={watch.Elapsed.TotalMilliseconds / frames:F1}");
     return;
 }
 
+bool Env(string name, bool fallback) => bool.Parse(Environment.GetEnvironmentVariable(name) ?? fallback.ToString());
+bool overlay = Env("SHOW_OVERLAY", true);
 string path = Path.Combine(dir, "measure.mp4");
 if (File.Exists(path)) File.Delete(path);
-bool overlay = bool.Parse(Environment.GetEnvironmentVariable("SHOW_OVERLAY") ?? "true");
 using var session = new RecordingSession(new RecordingOptions
 {
     Bounds = bounds,
     Format = RecordingFormat.Mp4,
     FramesPerSecond = 60,
-    ShowCursor = overlay,
-    HighlightClicks = overlay,
-    ShowCoordinates = overlay,
+    ShowCursor = Env("SHOW_CURSOR", overlay),
+    HighlightClicks = Env("SHOW_CLICKS", overlay),
+    ShowCoordinates = Env("SHOW_COORDS", overlay),
     OutputPath = path
 });
-long dropped = 0, framesReported = 0;
+long dropped = 0, reported = 0;
 string backend = "";
-session.Progress += (_, p) => { dropped = p.DroppedFrames; framesReported = p.FrameCount; backend = p.Backend; };
+session.Progress += (_, p) => { dropped = p.DroppedFrames; reported = p.FrameCount; backend = p.Backend; };
+
+int wiggle = 0;
+if (Env("WIGGLE", false))
+{
+    wiggle = 1;
+    _ = Task.Run(async () =>
+    {
+        int t = 0;
+        while (Volatile.Read(ref wiggle) == 1)
+        {
+            Native.SetCursorPos(200 + (int)(Math.Sin(t / 6.0) * 900) + 900, 300 + (int)(Math.Cos(t / 9.0) * 400) + 300);
+            t++;
+            await Task.Delay(8);
+        }
+    });
+}
+
 session.Start();
 await Task.Delay(TimeSpan.FromSeconds(seconds));
 var result = await session.StopAsync();
-Console.WriteLine($"backend={backend} frames={result.FrameCount} dropped={dropped} reportedFrames={framesReported} fps={(result.FrameCount / result.Duration.TotalSeconds):F1} droppedPct={(100.0 * dropped / Math.Max(1, dropped + result.FrameCount)):F1}% size={new FileInfo(path).Length / 1024 / 1024}MB");
+Volatile.Write(ref wiggle, 0);
+Console.WriteLine($"backend={backend} frames={result.FrameCount} dropped={dropped} reportedFrames={reported} fps={(result.FrameCount / result.Duration.TotalSeconds):F1} droppedPct={(100.0 * dropped / Math.Max(1, dropped + result.FrameCount)):F1}% size={new FileInfo(path).Length / 1024 / 1024}MB cursor=({Env("SHOW_CURSOR", overlay)},{Env("SHOW_COORDS", overlay)},{Env("SHOW_CLICKS", overlay)}) wiggle={Env("WIGGLE", false)}");
+
+static class Native
+{
+    [DllImport("user32.dll")] internal static extern bool SetCursorPos(int x, int y);
+}

@@ -78,9 +78,19 @@ internal sealed unsafe class D3D11Bridge : IDisposable
             try
             {
                 int stride = checked(textureWidth * 4);
-                byte[] pixels = GC.AllocateUninitializedArray<byte>(checked(stride * textureHeight));
-                for (int row = 0; row < textureHeight; row++)
-                    Marshal.Copy(mapped.Data + checked((nint)((long)row * mapped.RowPitch)), pixels, row * stride, stride);
+                int length = checked(stride * textureHeight);
+                byte[] pixels = GC.AllocateUninitializedArray<byte>(length);
+                if ((int)mapped.RowPitch == stride)
+                {
+                    // Tightly packed staging texture: one bulk copy instead of one per row.
+                    fixed (byte* destination = pixels)
+                        Buffer.MemoryCopy((void*)mapped.Data, destination, length, length);
+                }
+                else
+                {
+                    for (int row = 0; row < textureHeight; row++)
+                        Marshal.Copy(mapped.Data + checked((nint)((long)row * mapped.RowPitch)), pixels, row * stride, stride);
+                }
                 return pixels;
             }
             finally
