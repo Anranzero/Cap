@@ -144,3 +144,18 @@ dotnet run --project tests/Cap.Ui.Tests -c Release -- .artifacts/ui-review
 本机实际验证与未覆盖场景见 [docs/verification.md](docs/verification.md)。多显示器混合 DPI、负坐标实体屏幕、HDR、设备丢失和数小时稳定性需要对应硬件继续验收，不能仅由单屏测试推断为通过。
 
 MIT 开源许可证见 [LICENSE](LICENSE)。Microsoft .NET/WPF/Windows SDK 运行时适用各自的微软许可证，系统组件由 Windows 提供。
+
+## 代码同步
+
+仓库：<https://github.com/Anranzero/Cap>（`main` 分支）。
+
+每次改动完成后默认同步，无需手动记命令：
+
+```powershell
+pwsh -NoProfile -File sync.ps1                 # 暂存所有改动、提交并推送
+pwsh -NoProfile -File sync.ps1 -Message "说明"  # 自定义提交信息
+pwsh -NoProfile -File sync.ps1 -NoPush         # 只提交不推送
+```
+
+`dist/`、`rust/target/`、`.artifacts/` 等构建与本地验证产物已在 `.gitignore` 中排除，
+仓库只保留源码、资源与文档。
