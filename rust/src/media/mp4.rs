@@ -151,33 +151,52 @@ fn to_nv12(frame: &Frame) -> Vec<u8> {
     let h = frame.height as usize;
     let plane = w * h;
     let mut out = vec![0; plane * 3 / 2];
-    let clip = |v: i32| v.clamp(0, 255) as u8;
-    for y in (0..h).step_by(2) {
-        for x in (0..w).step_by(2) {
-            let (mut r, mut g, mut b) = (0, 0, 0);
-            for dy in 0..2 {
-                for dx in 0..2 {
-                    let p = (y + dy) * w + x + dx;
-                    let i = p * 4;
-                    let (b0, g0, r0) = (
-                        frame.pixels[i] as i32,
-                        frame.pixels[i + 1] as i32,
-                        frame.pixels[i + 2] as i32,
-                    );
-                    out[p] = clip(((66 * r0 + 129 * g0 + 25 * b0 + 128) >> 8) + 16);
-                    r += r0;
-                    g += g0;
-                    b += b0;
+    // Parallel row pairs: the serial version could not keep 1440p60 fed.
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .clamp(1, 8);
+    let rows_per = (((h / threads).max(2)) + 1) & !1;
+    struct SendPtr(*mut u8);
+    unsafe impl Send for SendPtr {}
+    unsafe impl Sync for SendPtr {}
+    let base = SendPtr(out.as_mut_ptr());
+    std::thread::scope(|scope| {
+        let mut start = 0usize;
+        while start < h {
+            let end = (start + rows_per).min(h);
+            let base = &base;
+            let pixels = &frame.pixels;
+            scope.spawn(move || {
+                let target = unsafe { std::slice::from_raw_parts_mut(base.0, plane * 3 / 2) };
+                let clip = |v: i32| v.clamp(0, 255) as u8;
+                let mut y = start;
+                while y < end {
+                    for x in (0..w).step_by(2) {
+                        let (mut r, mut g, mut b) = (0, 0, 0);
+                        for dy in 0..2 {
+                            for dx in 0..2 {
+                                let p = (y + dy) * w + x + dx;
+                                let i = p * 4;
+                                let (b0, g0, r0) =
+                                    (pixels[i] as i32, pixels[i + 1] as i32, pixels[i + 2] as i32);
+                                target[p] = clip(((66 * r0 + 129 * g0 + 25 * b0 + 128) >> 8) + 16);
+                                r += r0;
+                                g += g0;
+                                b += b0;
+                            }
+                        }
+                        let (r, g, b) = (r / 4, g / 4, b / 4);
+                        let uv = plane + y / 2 * w + x;
+                        target[uv] = clip(((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128);
+                        target[uv + 1] = clip(((112 * r - 94 * g - 18 * b + 128) >> 8) + 128);
+                    }
+                    y += 2;
                 }
-            }
-            r /= 4;
-            g /= 4;
-            b /= 4;
-            let uv = plane + y / 2 * w + x;
-            out[uv] = clip(((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128);
-            out[uv + 1] = clip(((112 * r - 94 * g - 18 * b + 128) >> 8) + 128);
+            });
+            start = end;
         }
-    }
+    });
     out
 }
 pub struct DecodedVideo {
