@@ -19,6 +19,7 @@ internal sealed class GraphicsCaptureSource : ICaptureSource
     private readonly PixelRect requestedBounds;
     private SizeInt32 poolSize;
     private PixelFrame? previousFrame;
+    private byte[] previousPixels = Array.Empty<byte>();
     private bool closed, disposed;
     public PixelRect Bounds
     {
@@ -123,9 +124,17 @@ internal sealed class GraphicsCaptureSource : ICaptureSource
                 }
                 content = frame.ContentSize;
                 using var surface = frame.Surface;
-                byte[] pixels = bridge.ReadPixels(surface, content.Width, content.Height, out int width, out int height);
+                // Try a non-blocking GPU readback first: waiting for the copy to finish
+                // on the capture thread was the dominant cost at 1440p60.
+                byte[]? pixels = bridge.ReadPixels(surface, content.Width, content.Height, out int width, out int height, nonBlocking: true);
+                if (pixels is null)
+                {
+                    if (previousFrame is not null) return Clone(previousFrame);
+                    pixels = bridge.ReadPixels(surface, content.Width, content.Height, out width, out height);
+                    if (pixels is null) throw new TimeoutException("Windows Graphics Capture readback did not complete.");
+                }
                 output = Crop(pixels, width, height);
-                previousFrame = Clone(output);
+                StorePrevious(output);
             }
             finally
             {
@@ -142,6 +151,9 @@ internal sealed class GraphicsCaptureSource : ICaptureSource
 
     private PixelFrame Crop(byte[] source, int width, int height)
     {
+        // Full-monitor captures need no copy at all: the readback buffer is already the frame.
+        if (offsetX == 0 && offsetY == 0 && width == requestedBounds.Width && height == requestedBounds.Height)
+            return new(requestedBounds.Width, requestedBounds.Height, source);
         byte[] output = new byte[checked(requestedBounds.Width * requestedBounds.Height * 4)];
         int copyWidth = Math.Min(requestedBounds.Width, Math.Max(0, width - offsetX));
         int copyHeight = Math.Min(requestedBounds.Height, Math.Max(0, height - offsetY));
@@ -153,6 +165,14 @@ internal sealed class GraphicsCaptureSource : ICaptureSource
     }
 
     private static PixelFrame Clone(PixelFrame frame) => new(frame.Width, frame.Height, (byte[])frame.Pixels.Clone());
+
+    /// <summary>Keeps the last clean frame (before overlays) in a reused buffer.</summary>
+    private void StorePrevious(PixelFrame frame)
+    {
+        if (previousPixels.Length != frame.Pixels.Length) previousPixels = new byte[frame.Pixels.Length];
+        Buffer.BlockCopy(frame.Pixels, 0, previousPixels, 0, frame.Pixels.Length);
+        previousFrame = new PixelFrame(frame.Width, frame.Height, previousPixels);
+    }
 
     public void Dispose()
     {

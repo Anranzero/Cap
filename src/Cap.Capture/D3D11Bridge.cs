@@ -48,7 +48,7 @@ internal sealed unsafe class D3D11Bridge : IDisposable
         }
     }
 
-    internal byte[] ReadPixels(IDirect3DSurface surface, int width, int height, out int textureWidth, out int textureHeight)
+    internal byte[]? ReadPixels(IDirect3DSurface surface, int width, int height, out int textureWidth, out int textureHeight, bool nonBlocking = false)
     {
         nint abi = 0, access = 0, texture = 0;
         try
@@ -65,8 +65,16 @@ internal sealed unsafe class D3D11Bridge : IDisposable
             EnsureStaging(description);
             ((delegate* unmanaged[Stdcall]<nint, nint, nint, void>)Vtable(context)[47])(context, staging, texture);
             MappedResource mapped;
-            Marshal.ThrowExceptionForHR(((delegate* unmanaged[Stdcall]<nint, nint, uint, uint, uint, MappedResource*, int>)Vtable(context)[14])
-                (context, staging, 0, 1, 0, &mapped));
+            int hr = ((delegate* unmanaged[Stdcall]<nint, nint, uint, uint, uint, MappedResource*, int>)Vtable(context)[14])
+                (context, staging, 0, 1, nonBlocking ? 0x10000u : 0u, &mapped);
+            if (nonBlocking && hr != 0)
+            {
+                // DXGI_ERROR_WAS_STILL_DRAWING (0x887A0001) and S_FALSE both mean the copy is
+                // not ready yet; the caller repeats the last frame and retries next tick.
+                textureWidth = textureHeight = 0;
+                return null;
+            }
+            Marshal.ThrowExceptionForHR(hr);
             try
             {
                 int stride = checked(textureWidth * 4);

@@ -15,6 +15,8 @@ internal static unsafe class MfNative
     internal static readonly Guid PixelAspect = new("c6376a1e-8d0a-4027-be45-6d9a0ad39bb6");
     internal static readonly Guid Interlace = new("e2724bb8-e676-4806-b4b2-a8d6efb44ccd");
     internal static readonly Guid Bitrate = new("20332624-fb0d-4d9e-bd0d-cbf6786c102e");
+    /// <summary>MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS: let the sink writer pick NVENC/QSV when present.</summary>
+    internal static readonly Guid EnableHardwareTransforms = new("a634a91c-822b-41b9-a494-4de4643612b0");
 
     internal static void Check(int hr)
     {
@@ -36,6 +38,7 @@ internal static unsafe class MfNative
 
     [DllImport("mfplat.dll", ExactSpelling = true)] internal static extern int MFStartup(int version, int flags);
     [DllImport("mfplat.dll", ExactSpelling = true)] internal static extern int MFShutdown();
+    [DllImport("mfplat.dll", ExactSpelling = true)] internal static extern int MFCreateAttributes(out nint attributes, uint initialSize);
     [DllImport("mfplat.dll", ExactSpelling = true)] internal static extern int MFCreateMediaType(out nint type);
     [DllImport("mfplat.dll", ExactSpelling = true)] internal static extern int MFCreateSample(out nint sample);
     [DllImport("mfplat.dll", ExactSpelling = true)] internal static extern int MFCreateMemoryBuffer(int size, out nint buffer);

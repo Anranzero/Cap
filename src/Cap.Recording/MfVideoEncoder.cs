@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Threading.Tasks;
 using Cap.Core;
 
 namespace Cap.Recording;
@@ -27,13 +28,23 @@ internal sealed unsafe class MfVideoEncoder : IFrameEncoder
             if (hr != unchecked((int)0x80010106)) { MfNative.Check(hr); comInitialized = true; }
             MfNative.Check(MfNative.MFStartup(0x20070, 0));
             startup = true;
-            MfNative.Check(MfNative.MFCreateSinkWriterFromURL(path, 0, 0, out writer));
+            // Ask Media Foundation for a hardware H.264 MFT first (NVENC/QSV/AMF) and fall
+            // back to the inbox software encoder automatically when none is available.
+            nint attributes = 0;
+            try
+            {
+                MfNative.Check(MfNative.MFCreateAttributes(out attributes, 1));
+                MfNative.UInt32(attributes, MfNative.EnableHardwareTransforms, 1);
+                MfNative.Check(MfNative.MFCreateSinkWriterFromURL(path, 0, attributes, out writer));
+            }
+            finally { MfNative.Release(ref attributes); }
             nint output = 0, input = 0;
             try
             {
                 MfNative.Check(MfNative.MFCreateMediaType(out output));
                 SetVideoType(output, MfNative.H264, width, height, fps);
-                uint bitrate = (uint)Math.Clamp((long)width * height * fps / 5, 600_000, 40_000_000);
+                // Screen content compresses well; a lower bitrate keeps the encoder fast at 60 fps.
+                uint bitrate = (uint)Math.Clamp((long)width * height * fps / 10, 600_000, 30_000_000);
                 MfNative.UInt32(output, MfNative.Bitrate, bitrate);
                 uint index;
                 MfNative.Check(((delegate* unmanaged[Stdcall]<nint, nint, uint*, int>)MfNative.Slot(writer, 3))(writer, output, &index));
@@ -90,26 +101,45 @@ internal sealed unsafe class MfVideoEncoder : IFrameEncoder
     private void ConvertNv12(byte[] bgra)
     {
         int plane = width * height;
-        for (int y = 0; y < height; y += 2)
+        // Parallel over row pairs: the previous serial loop could not keep up at 60 fps
+        // on 1440p full-screen recordings.
+        fixed (byte* source = bgra)
+        fixed (byte* target = nv12)
         {
-            for (int x = 0; x < width; x += 2)
+            byte* src = source;
+            byte* dst = target;
+            Parallel.For(0, height / 2, row =>
             {
-                int rSum = 0, gSum = 0, bSum = 0;
-                for (int dy = 0; dy < 2; dy++)
-                    for (int dx = 0; dx < 2; dx++)
-                    {
-                        int p = (y + dy) * width + x + dx, s = p * 4;
-                        int b = bgra[s], g = bgra[s + 1], r = bgra[s + 2];
-                        nv12[p] = Clamp(((66 * r + 129 * g + 25 * b + 128) >> 8) + 16);
-                        rSum += r; gSum += g; bSum += b;
-                    }
-                int rAvg = rSum / 4, gAvg = gSum / 4, bAvg = bSum / 4;
-                int uv = plane + y / 2 * width + x;
-                nv12[uv] = Clamp(((-38 * rAvg - 74 * gAvg + 112 * bAvg + 128) >> 8) + 128);
-                nv12[uv + 1] = Clamp(((112 * rAvg - 94 * gAvg - 18 * bAvg + 128) >> 8) + 128);
-            }
+                int y = row * 2;
+                byte* top = src + (long)y * width * 4;
+                byte* bottom = top + (long)width * 4;
+                byte* lumaTop = dst + (long)y * width;
+                byte* lumaBottom = lumaTop + width;
+                byte* chroma = dst + plane + (long)row * width;
+                for (int x = 0; x < width; x += 2)
+                {
+                    byte* t = top + x * 4;
+                    byte* b = bottom + x * 4;
+                    int b0 = t[0], g0 = t[1], r0 = t[2];
+                    int b1 = t[4], g1 = t[5], r1 = t[6];
+                    int b2 = b[0], g2 = b[1], r2 = b[2];
+                    int b3 = b[4], g3 = b[5], r3 = b[6];
+                    lumaTop[x] = Y(r0, g0, b0);
+                    lumaTop[x + 1] = Y(r1, g1, b1);
+                    lumaBottom[x] = Y(r2, g2, b2);
+                    lumaBottom[x + 1] = Y(r3, g3, b3);
+                    int rAvg = (r0 + r1 + r2 + r3) >> 2;
+                    int gAvg = (g0 + g1 + g2 + g3) >> 2;
+                    int bAvg = (b0 + b1 + b2 + b3) >> 2;
+                    chroma[x] = Clamp(((-38 * rAvg - 74 * gAvg + 112 * bAvg + 128) >> 8) + 128);
+                    chroma[x + 1] = Clamp(((112 * rAvg - 94 * gAvg - 18 * bAvg + 128) >> 8) + 128);
+                }
+            });
         }
     }
+
+    private static byte Y(int r, int g, int b) =>
+        Clamp(((66 * r + 129 * g + 25 * b + 128) >> 8) + 16);
     private static byte Clamp(int value) => (byte)Math.Clamp(value, 0, 255);
     public void Complete()
     {

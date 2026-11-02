@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -87,8 +88,16 @@ internal sealed class FrameJournal : IDisposable
     private const uint Commit = 0xca91f00d;
     private readonly FileStream stream;
     private readonly BinaryWriter writer;
+    private readonly BlockingCollection<Entry> queue = new(new ConcurrentQueue<Entry>(), 2);
+    private readonly Thread worker;
+    private readonly MemoryStream compressed = new();
     private long lastFlush;
+    private long droppedFrames;
+    private Exception? failure;
+    private bool completed;
     internal string Path { get; }
+
+    private readonly record struct Entry(byte[] Pixels, long Time, long Duration);
 
     internal FrameJournal(string path, JournalHeader header)
     {
@@ -103,6 +112,8 @@ internal sealed class FrameJournal : IDisposable
             writer.Write(json);
             stream.Flush(true);
             lastFlush = Environment.TickCount64;
+            worker = new Thread(DrainQueue) { IsBackground = true, Priority = ThreadPriority.AboveNormal, Name = "Cap recovery journal" };
+            worker.Start();
         }
         catch (Exception error)
         {
@@ -113,14 +124,41 @@ internal sealed class FrameJournal : IDisposable
         }
     }
 
+    /// <summary>
+    /// Crash-recovery frames are compressed and written on a background worker so the
+    /// recording loop never blocks on disk I/O (60 fps keeps the encoder fed).
+    /// </summary>
     internal void Write(PixelFrame frame, long time, long duration)
     {
-        using var compressed = new MemoryStream();
+        if (Volatile.Read(ref completed)) return;
+        if (!queue.TryAdd(new Entry(frame.Pixels, time, duration)))
+            Interlocked.Increment(ref droppedFrames);
+    }
+
+    /// <summary>Number of recovery frames skipped because the writer could not keep up.</summary>
+    internal long DroppedFrames => Interlocked.Read(ref droppedFrames);
+
+    private void DrainQueue()
+    {
+        try
+        {
+            foreach (Entry entry in queue.GetConsumingEnumerable())
+                WriteEntry(entry);
+        }
+        catch (Exception error)
+        {
+            failure = error;
+        }
+    }
+
+    private void WriteEntry(Entry entry)
+    {
+        compressed.SetLength(0);
         using (var deflater = new DeflateStream(compressed, CompressionLevel.Fastest, leaveOpen: true))
-            deflater.Write(frame.Pixels);
+            deflater.Write(entry.Pixels);
         writer.Write(checked((int)compressed.Length));
-        writer.Write(time);
-        writer.Write(duration);
+        writer.Write(entry.Time);
+        writer.Write(entry.Duration);
         compressed.Position = 0;
         compressed.CopyTo(stream);
         writer.Write(Commit);
@@ -183,13 +221,26 @@ internal sealed class FrameJournal : IDisposable
 
     public void Dispose()
     {
+        if (completed) return;
+        completed = true;
         List<Exception>? failures = null;
+        try
+        {
+            queue.CompleteAdding();
+            // The bounded queue guarantees a short backlog, so this join is quick.
+            if (!worker.Join(TimeSpan.FromSeconds(10)))
+                failures = new List<Exception> { new TimeoutException("Recovery journal writer did not finish in time.") };
+        }
+        catch (Exception error) { (failures ??= new()).Add(error); }
         try { writer.Flush(); stream.Flush(true); }
         catch (Exception error) { (failures ??= new()).Add(error); }
         try { writer.Dispose(); }
         catch (Exception error) { (failures ??= new()).Add(error); }
         try { stream.Dispose(); }
         catch (Exception error) { (failures ??= new()).Add(error); }
+        try { compressed.Dispose(); queue.Dispose(); }
+        catch (Exception error) { (failures ??= new()).Add(error); }
+        if (failure is not null) (failures ??= new()).Add(failure);
         if (failures is { Count: 1 }) ExceptionDispatchInfo.Capture(failures[0]).Throw();
         if (failures is not null) throw new AggregateException("Recovery journal could not be flushed or closed.", failures);
     }

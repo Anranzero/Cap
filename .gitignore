@@ -10,3 +10,4 @@ dist/*
 **/target/
 rust/dist/
 *.pdb
+.artifacts/recmeasure/
