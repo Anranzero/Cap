@@ -1,0 +1,12 @@
+**/bin/
+**/obj/
+.vs/
+.superpowers/
+dist/*
+!dist/.gitkeep
+*.user
+*.log
+.artifacts/
+**/target/
+rust/dist/
+*.pdb

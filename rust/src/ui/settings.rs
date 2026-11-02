@@ -1,0 +1,656 @@
+use super::{
+    UiEvent,
+    common::{self, Canvas},
+    runtime::{self, WindowHandler, WindowOptions},
+};
+use cap_rust::{
+    recording::RecordingFormat,
+    selection::CaptureMode,
+    settings::{Hotkey, Settings, Theme},
+};
+use std::{cell::RefCell, collections::HashMap, path::PathBuf, rc::Rc};
+use windows::Win32::{
+    Foundation::*,
+    Graphics::Gdi::*,
+    UI::{Controls::*, Input::KeyboardAndMouse::GetFocus, WindowsAndMessaging::*},
+};
+
+const SAVE: u16 = 200;
+const EXIT: u16 = 201;
+const BROWSE: u16 = 202;
+const SETUP: u16 = 203;
+const RECOVER: u16 = 204;
+const KEY_ERROR: u16 = 205;
+const HOTKEY_FIRST: u16 = 1001;
+pub const CAPTURE_KEY: u32 = WM_APP + 80;
+
+#[path = "settings_layout.rs"]
+mod layout;
+
+pub fn show(settings: Rc<RefCell<Settings>>) -> Result<HWND, String> {
+    let draft = settings.borrow().clone();
+    runtime::create(
+        Box::new(SettingsView {
+            draft,
+            settings,
+            tab: 0,
+            controls: HashMap::new(),
+            brush: HBRUSH::default(),
+            observed: Theme::Light,
+            positions: HashMap::new(),
+            scroll: 0,
+        }),
+        WindowOptions {
+            title: "cap · 设置 · Rust".into(),
+            rect: layout::initial_rect()?,
+            style: WS_OVERLAPPEDWINDOW | WS_VSCROLL,
+            ex_style: WINDOW_EX_STYLE(0),
+            owner: None,
+            visible: true,
+        },
+    )
+}
+
+struct SettingsView {
+    settings: Rc<RefCell<Settings>>,
+    draft: Settings,
+    tab: u16,
+    controls: HashMap<u16, HWND>,
+    brush: HBRUSH,
+    observed: Theme,
+    positions: HashMap<u16, RECT>,
+    scroll: i32,
+}
+impl Drop for SettingsView {
+    fn drop(&mut self) {
+        if !self.brush.is_invalid() {
+            unsafe {
+                let _ = DeleteObject(self.brush.into());
+            }
+        }
+    }
+}
+impl SettingsView {
+    fn field(
+        &mut self,
+        hwnd: HWND,
+        id: u16,
+        label: &str,
+        value: &str,
+        y: i32,
+        checkbox: bool,
+    ) -> Result<(), String> {
+        let label_id = id + 100;
+        let label_handle = common::child(
+            hwnd,
+            "STATIC",
+            label,
+            label_id,
+            common::rect(218, y + 4, 220, 27),
+            WINDOW_STYLE(0),
+        )?;
+        self.controls.insert(label_id, label_handle);
+        self.positions
+            .insert(label_id, common::rect(218, y + 4, 220, 27));
+        let control = common::child(
+            hwnd,
+            if checkbox { "BUTTON" } else { "EDIT" },
+            if checkbox { "" } else { value },
+            id,
+            common::rect(455, y, 360, 32),
+            WS_TABSTOP
+                | if checkbox {
+                    WINDOW_STYLE(BS_AUTOCHECKBOX as u32)
+                } else {
+                    WS_BORDER | WINDOW_STYLE(ES_AUTOHSCROLL as u32)
+                },
+        )?;
+        if checkbox {
+            unsafe {
+                SendMessageW(
+                    control,
+                    BM_SETCHECK,
+                    Some(WPARAM(usize::from(value == "true"))),
+                    None,
+                );
+            }
+        }
+        self.controls.insert(id, control);
+        self.positions.insert(id, common::rect(455, y, 360, 32));
+        Ok(())
+    }
+    fn button(&mut self, hwnd: HWND, id: u16, label: &str, rect: RECT) -> Result<(), String> {
+        let control = common::child(
+            hwnd,
+            "BUTTON",
+            label,
+            id,
+            rect,
+            WS_TABSTOP | WINDOW_STYLE(BS_OWNERDRAW as u32),
+        )?;
+        self.controls.insert(id, control);
+        self.positions.insert(id, rect);
+        Ok(())
+    }
+    fn value(&self, id: u16) -> String {
+        self.controls
+            .get(&id)
+            .map(|&h| common::get_text(h))
+            .unwrap_or_default()
+    }
+    fn checked(&self, id: u16) -> bool {
+        self.controls
+            .get(&id)
+            .is_some_and(|&h| unsafe { SendMessageW(h, BM_GETCHECK, None, None).0 != 0 })
+    }
+    fn read_tab(&mut self) -> Result<(), String> {
+        match self.tab {
+            0 => {
+                self.draft.save_directory = PathBuf::from(self.value(1));
+                self.draft.run_at_startup = self.checked(2);
+                self.draft.close_to_tray = self.checked(3);
+            }
+            1 => {
+                self.draft.screenshot_hotkey = self.value(HOTKEY_FIRST);
+                self.draft.recording_hotkey = self.value(HOTKEY_FIRST + 1);
+                self.draft.gif_hotkey = self.value(HOTKEY_FIRST + 2);
+            }
+            2 => {
+                let number = |id| {
+                    self.value(id)
+                        .trim()
+                        .parse::<u32>()
+                        .map_err(|_| "帧率、宽度和字号必须是整数。".to_string())
+                };
+                let (fps, gif_fps, width, font) =
+                    (number(10)?, number(11)?, number(12)?, number(17)?);
+                self.draft.frames_per_second = fps;
+                self.draft.gif_frames_per_second = gif_fps;
+                self.draft.gif_max_width = width;
+                self.draft.show_cursor = self.checked(13);
+                self.draft.highlight_clicks = self.checked(14);
+                self.draft.show_coordinates = self.checked(15);
+                self.draft.relative_coordinates = self.checked(16);
+                self.draft.coordinate_font_size = font;
+                self.draft.coordinate_color = self.value(18);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    fn rebuild(&mut self, hwnd: HWND) -> Result<(), String> {
+        for (_, child) in self.controls.drain() {
+            unsafe {
+                let _ = DestroyWindow(child);
+            }
+        }
+        self.positions.clear();
+        self.scroll = 0;
+        for (index, label) in ["常规", "快捷键", "录制", "外观", "关于"]
+            .iter()
+            .enumerate()
+        {
+            self.button(
+                hwnd,
+                300 + index as u16,
+                label,
+                common::rect(20, 95 + index as i32 * 51, 145, 40),
+            )?;
+        }
+        self.button(hwnd, SAVE, "保存设置", common::rect(680, 570, 140, 40))?;
+        self.button(hwnd, EXIT, "退出程序", common::rect(218, 570, 125, 40))?;
+        match self.tab {
+            0 => {
+                let save_directory = self.draft.save_directory.to_string_lossy().into_owned();
+                self.field(hwnd, 1, "保存目录", &save_directory, 136, false)?;
+                self.button(hwnd, BROWSE, "浏览…", common::rect(700, 181, 115, 32))?;
+                self.field(
+                    hwnd,
+                    2,
+                    "开机自动启动",
+                    if self.draft.run_at_startup {
+                        "true"
+                    } else {
+                        "false"
+                    },
+                    245,
+                    true,
+                )?;
+                self.field(
+                    hwnd,
+                    3,
+                    "关闭窗口后留在托盘",
+                    if self.draft.close_to_tray {
+                        "true"
+                    } else {
+                        "false"
+                    },
+                    303,
+                    true,
+                )?;
+            }
+            1 => {
+                for (index, (label, value)) in [
+                    ("截图", self.draft.screenshot_hotkey.clone()),
+                    ("MP4 录制 / 停止", self.draft.recording_hotkey.clone()),
+                    ("GIF 录制 / 停止", self.draft.gif_hotkey.clone()),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    self.field(
+                        hwnd,
+                        HOTKEY_FIRST + index as u16,
+                        label,
+                        &value,
+                        145 + index as i32 * 74,
+                        false,
+                    )?;
+                }
+                self.body_label(hwnd, KEY_ERROR, "", common::rect(218, 390, 597, 60))?;
+            }
+            2 => {
+                let fields = [
+                    (
+                        10,
+                        "MP4 帧率",
+                        self.draft.frames_per_second.to_string(),
+                        false,
+                    ),
+                    (
+                        11,
+                        "GIF 帧率",
+                        self.draft.gif_frames_per_second.to_string(),
+                        false,
+                    ),
+                    (
+                        12,
+                        "GIF 最大宽度",
+                        self.draft.gif_max_width.to_string(),
+                        false,
+                    ),
+                    (13, "显示鼠标指针", self.draft.show_cursor.to_string(), true),
+                    (
+                        14,
+                        "突出显示点击",
+                        self.draft.highlight_clicks.to_string(),
+                        true,
+                    ),
+                    (
+                        15,
+                        "显示鼠标坐标",
+                        self.draft.show_coordinates.to_string(),
+                        true,
+                    ),
+                    (
+                        16,
+                        "使用选区相对坐标",
+                        self.draft.relative_coordinates.to_string(),
+                        true,
+                    ),
+                    (
+                        17,
+                        "坐标字号",
+                        self.draft.coordinate_font_size.to_string(),
+                        false,
+                    ),
+                    (
+                        18,
+                        "坐标颜色 #RRGGBB",
+                        self.draft.coordinate_color.clone(),
+                        false,
+                    ),
+                ];
+                for (index, (id, label, value, check)) in fields.into_iter().enumerate() {
+                    self.field(hwnd, id, label, &value, 113 + index as i32 * 38, check)?;
+                }
+                self.button(
+                    hwnd,
+                    SETUP,
+                    "窗口 / 全屏录制",
+                    common::rect(218, 478, 260, 38),
+                )?;
+                self.button(
+                    hwnd,
+                    RECOVER,
+                    "恢复中断的录制",
+                    common::rect(495, 478, 320, 38),
+                )?;
+            }
+            3 => {
+                self.button(hwnd, 210, "浅色主题", common::rect(230, 150, 250, 80))?;
+                self.button(hwnd, 211, "深色主题", common::rect(510, 150, 250, 80))?;
+            }
+            4 => {
+                for (id, text, y, height) in [
+                    (
+                        220,
+                        "Rust 原生版 · 截图、批注、滚动截图、OCR、MP4 / GIF",
+                        140,
+                        45,
+                    ),
+                    (221, "使用 Windows 系统捕获、OCR 和媒体编码。", 198, 36),
+                    (222, "不包含音频录制；原版程序仍保留。", 244, 36),
+                ] {
+                    self.body_label(hwnd, id, text, common::rect(230, y, 550, height))?;
+                }
+                self.button(hwnd, 212, "打开保存目录", common::rect(230, 305, 250, 42))?;
+                self.button(hwnd, 213, "截图", common::rect(230, 370, 160, 42))?;
+                self.body_label(
+                    hwnd,
+                    223,
+                    "界面字体：HarmonyOS Sans SC（华为鸿蒙字体）\nCopyright 2021 Huawei Device Co., Ltd.",
+                    common::rect(230, 427, 550, 44),
+                )?;
+                let license_rect = common::rect(230, 485, 550, 120);
+                let license = common::child(
+                    hwnd,
+                    "EDIT",
+                    super::fonts::LICENSE.trim_end_matches('\0'),
+                    224,
+                    license_rect,
+                    WS_BORDER
+                        | WS_VSCROLL
+                        | WS_TABSTOP
+                        | WINDOW_STYLE((ES_MULTILINE | ES_READONLY) as u32),
+                )?;
+                self.controls.insert(224, license);
+                self.positions.insert(224, license_rect);
+            }
+            _ => {}
+        }
+        self.layout(hwnd)?;
+        common::invalidate(hwnd);
+        Ok(())
+    }
+    fn sync_theme(&mut self, hwnd: HWND) {
+        let theme = self.settings.borrow().theme;
+        if theme != self.observed || self.brush.is_invalid() {
+            self.observed = theme;
+            let old = self.brush;
+            self.brush = unsafe { CreateSolidBrush(COLORREF(common::palette(theme).panel)) };
+            if !old.is_invalid() {
+                unsafe {
+                    let _ = DeleteObject(old.into());
+                }
+            }
+            unsafe {
+                let dark = i32::from(theme == Theme::Dark);
+                let _ = windows::Win32::Graphics::Dwm::DwmSetWindowAttribute(
+                    hwnd,
+                    windows::Win32::Graphics::Dwm::DWMWA_USE_IMMERSIVE_DARK_MODE,
+                    (&dark as *const i32).cast(),
+                    4,
+                );
+            }
+            common::invalidate(hwnd);
+            for &child in self.controls.values() {
+                common::invalidate(child);
+            }
+        }
+    }
+}
+impl WindowHandler for SettingsView {
+    fn created(&mut self, hwnd: HWND) -> Result<(), String> {
+        self.sync_theme(hwnd);
+        unsafe {
+            SetTimer(Some(hwnd), 1, 150, None);
+        }
+        self.rebuild(hwnd)
+    }
+    fn message(
+        &mut self,
+        hwnd: HWND,
+        msg: u32,
+        w: WPARAM,
+        l: LPARAM,
+    ) -> Result<Option<LRESULT>, String> {
+        match msg {
+            WM_TIMER => {
+                self.sync_theme(hwnd);
+                return Ok(Some(LRESULT(0)));
+            }
+            WM_GETMINMAXINFO => {
+                let work = layout::work_area(hwnd)?;
+                let info = unsafe { &mut *(l.0 as *mut MINMAXINFO) };
+                info.ptMinTrackSize = POINT {
+                    x: 740.min(work.right - work.left),
+                    y: 360.min(work.bottom - work.top),
+                };
+                return Ok(Some(LRESULT(0)));
+            }
+            WM_SIZE if w.0 != SIZE_MINIMIZED as usize => {
+                if self.controls.contains_key(&SAVE) {
+                    self.layout(hwnd)?;
+                }
+                return Ok(Some(LRESULT(0)));
+            }
+            WM_VSCROLL => {
+                self.scroll_message(hwnd, w)?;
+                return Ok(Some(LRESULT(0)));
+            }
+            WM_MOUSEWHEEL => {
+                self.scroll -= ((w.0 >> 16) as u16 as i16 as i32) / 120 * 56;
+                self.layout(hwnd)?;
+                return Ok(Some(LRESULT(0)));
+            }
+            WM_CLOSE => {
+                if self.settings.borrow().close_to_tray {
+                    runtime::close(hwnd)
+                } else {
+                    runtime::emit(UiEvent::Quit);
+                }
+                return Ok(Some(LRESULT(0)));
+            }
+            WM_COMMAND => {
+                let id = (w.0 & 0xffff) as u16;
+                if (300..305).contains(&id) {
+                    self.read_tab()?;
+                    self.tab = id - 300;
+                    self.rebuild(hwnd)?;
+                } else {
+                    match id {
+                        SAVE => {
+                            self.read_tab()?;
+                            self.draft.validate()?;
+                            runtime::emit(UiEvent::SettingsSave(self.draft.clone()));
+                        }
+                        EXIT => runtime::emit(UiEvent::Quit),
+                        BROWSE => {
+                            if let Some(path) = crate::platform::choose_folder(hwnd)? {
+                                if let Some(&field) = self.controls.get(&1) {
+                                    common::set_text(field, &path.to_string_lossy());
+                                }
+                            }
+                        }
+                        SETUP => runtime::emit(UiEvent::ConfigureRecording),
+                        RECOVER => {
+                            let directory = self.settings.borrow().save_directory.clone();
+                            if let Some(path) = crate::platform::file_dialog(
+                                hwnd,
+                                &directory,
+                                false,
+                                "cap 恢复日志\0*.capjournal\0",
+                                "",
+                                "capjournal",
+                            )? {
+                                runtime::emit(UiEvent::Recover(path));
+                            }
+                        }
+                        210 | 211 => {
+                            let theme = if id == 210 { Theme::Light } else { Theme::Dark };
+                            self.draft.theme = theme;
+                            runtime::emit(UiEvent::PreviewTheme(theme));
+                        }
+                        212 => runtime::emit(UiEvent::OpenFolder(
+                            self.settings.borrow().save_directory.clone(),
+                        )),
+                        213 => runtime::emit(UiEvent::Begin(
+                            CaptureMode::Screenshot,
+                            RecordingFormat::Mp4,
+                        )),
+                        _ => {}
+                    }
+                }
+                return Ok(Some(LRESULT(0)));
+            }
+            CAPTURE_KEY => {
+                let focus = unsafe { GetFocus() };
+                let id = unsafe { GetDlgCtrlID(focus) } as u16;
+                if (HOTKEY_FIRST..HOTKEY_FIRST + 3).contains(&id) {
+                    let value = if w.0 == 0x1b && l.0 == 0 {
+                        match id - HOTKEY_FIRST {
+                            0 => self.draft.screenshot_hotkey.clone(),
+                            1 => self.draft.recording_hotkey.clone(),
+                            _ => self.draft.gif_hotkey.clone(),
+                        }
+                    } else {
+                        Hotkey {
+                            modifiers: l.0 as u32,
+                            key: w.0 as u32,
+                        }
+                        .display()
+                    };
+                    let status = self.controls.get(&KEY_ERROR).copied();
+                    match Hotkey::parse(&value) {
+                        Ok(_) => {
+                            common::set_text(focus, &value);
+                            if let Some(status) = status {
+                                common::set_text(status, "");
+                            }
+                        }
+                        Err(error) => {
+                            if let Some(status) = status {
+                                common::set_text(status, &error);
+                            }
+                        }
+                    }
+                }
+                return Ok(Some(LRESULT(0)));
+            }
+            WM_DRAWITEM => {
+                let draw = unsafe { &*(l.0 as *const DRAWITEMSTRUCT) };
+                let p = common::palette(self.observed);
+                let active = draw.CtlID == SAVE as u32 || draw.CtlID == 300 + self.tab as u32;
+                common::button(
+                    draw.hDC,
+                    &common::get_text(draw.hwndItem),
+                    draw.rcItem,
+                    if active { p.accent } else { p.panel },
+                    if active {
+                        common::rgb(255, 255, 255)
+                    } else {
+                        p.text
+                    },
+                );
+                return Ok(Some(LRESULT(1)));
+            }
+            WM_CTLCOLOREDIT | WM_CTLCOLORSTATIC | WM_CTLCOLORBTN => {
+                let dc = HDC(w.0 as *mut _);
+                let p = common::palette(self.observed);
+                unsafe {
+                    SetTextColor(dc, COLORREF(p.text));
+                    SetBkColor(dc, COLORREF(p.panel));
+                }
+                return Ok(Some(LRESULT(self.brush.0 as isize)));
+            }
+            WM_PAINT => {
+                let canvas = Canvas::begin(hwnd);
+                let p = common::palette(self.observed);
+                let r = common::client(hwnd);
+                common::fill(canvas.dc, r, p.bg);
+                common::rounded(
+                    canvas.dc,
+                    common::rect(190, 82, (r.right - 210).max(1), (r.bottom - 155).max(1)),
+                    p.panel,
+                    24,
+                );
+                common::label(canvas.dc, "cap", common::rect(26, 18, 130, 36), p.text);
+                common::label(
+                    canvas.dc,
+                    "截图 · 录屏",
+                    common::rect(26, 51, 145, 26),
+                    p.muted,
+                );
+                let (title, hint) = match self.tab {
+                    0 => ("常规设置", "保存位置、自启动和窗口关闭行为"),
+                    1 => ("全局快捷键", "点击输入框，直接按组合键；Esc 撤回本次录入"),
+                    2 => ("录制选项", "MP4：15 / 24 / 30 / 60 FPS；GIF：1–60 FPS"),
+                    3 => ("界面外观", "选择后立即生效并保存"),
+                    _ => ("关于 cap", "免费、离线、无广告的原生 Windows 工具"),
+                };
+                common::label(canvas.dc, title, common::rect(218, 17, 590, 32), p.text);
+                common::label(canvas.dc, hint, common::rect(218, 48, 590, 28), p.muted);
+                return Ok(Some(LRESULT(0)));
+            }
+            _ => {}
+        }
+        Ok(None)
+    }
+}
+
+pub fn focused_capture() -> Option<HWND> {
+    let focus = unsafe { GetFocus() };
+    if focus.is_invalid() {
+        return None;
+    }
+    let id = unsafe { GetDlgCtrlID(focus) } as u16;
+    if !(HOTKEY_FIRST..HOTKEY_FIRST + 3).contains(&id) {
+        return None;
+    }
+    unsafe { GetParent(focus) }.ok()
+}
+pub fn capture_message(message: &MSG) -> bool {
+    if !matches!(message.message, WM_KEYDOWN | WM_SYSKEYDOWN) {
+        return false;
+    }
+    let Some(owner) = focused_capture() else {
+        return false;
+    };
+    let modifiers = crate::platform::held_modifiers();
+    if message.wParam.0 == 0x09 && matches!(modifiers, 0 | 4) {
+        return false;
+    }
+    if Hotkey::is_modifier_key(message.wParam.0 as u32) {
+        return true;
+    }
+    unsafe {
+        if let Err(error) = PostMessageW(
+            Some(owner),
+            CAPTURE_KEY,
+            message.wParam,
+            LPARAM(modifiers as isize),
+        ) {
+            runtime::emit(UiEvent::Error(format!("录入快捷键失败：{error}")));
+        }
+    }
+    true
+}
+pub fn capture_registered(settings: &Settings, id: i32) -> bool {
+    let Some(owner) = focused_capture() else {
+        return false;
+    };
+    let value = match id {
+        1 => &settings.screenshot_hotkey,
+        2 => &settings.recording_hotkey,
+        _ => &settings.gif_hotkey,
+    };
+    match Hotkey::parse(value) {
+        Ok(key) => unsafe {
+            if let Err(error) = PostMessageW(
+                Some(owner),
+                CAPTURE_KEY,
+                WPARAM(key.key as usize),
+                LPARAM(key.modifiers as isize),
+            ) {
+                runtime::emit(UiEvent::Error(format!("录入已注册快捷键失败：{error}")));
+            }
+        },
+        Err(error) => runtime::emit(UiEvent::Error(error)),
+    }
+    true
+}
+
+#[cfg(test)]
+#[path = "settings_tests.rs"]
+mod tests;

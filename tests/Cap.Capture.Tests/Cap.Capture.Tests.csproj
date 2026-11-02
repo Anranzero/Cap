@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <UseWPF>true</UseWPF>
+  </PropertyGroup>
+  <ItemGroup><ProjectReference Include="../../src/Cap.Capture/Cap.Capture.csproj" /></ItemGroup>
+</Project>

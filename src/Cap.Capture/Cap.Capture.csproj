@@ -1,0 +1,4 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><UseWPF>true</UseWPF></PropertyGroup>
+  <ItemGroup><ProjectReference Include="../Cap.Core/Cap.Core.csproj" /></ItemGroup>
+</Project>

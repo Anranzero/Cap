@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType><UseWPF>true</UseWPF><UseWindowsForms>true</UseWindowsForms><ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>cap</AssemblyName><RootNamespace>Cap.App</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets/cap.ico</ApplicationIcon>
+    <Version>1.2.5</Version><Description>Free offline screen capture and recorder</Description>
+    <PublishSingleFile>true</PublishSingleFile><SelfContained>true</SelfContained><RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract><EnableCompressionInSingleFile>false</EnableCompressionInSingleFile>
+    <DebugType>embedded</DebugType>
+    <!-- WPF requires PerMonitorV2 in the manifest; WinForms is used only for tray/GIF hosting. -->
+    <NoWarn>$(NoWarn);WFAC010</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../Shared/VectorIcon.cs" Link="Visuals/VectorIcon.cs" />
+    <Resource Include="Assets/cap.png" /><Resource Include="Assets/cap.ico" />
+    <ProjectReference Include="../Cap.Core/Cap.Core.csproj" /><ProjectReference Include="../Cap.Capture/Cap.Capture.csproj" />
+    <ProjectReference Include="../Cap.Annotation/Cap.Annotation.csproj" /><ProjectReference Include="../Cap.Recording/Cap.Recording.csproj" />
+    <ProjectReference Include="../Cap.System/Cap.System.csproj" />
+  </ItemGroup>
+</Project>

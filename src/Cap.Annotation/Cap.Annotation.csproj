@@ -1,0 +1,5 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><UseWPF>true</UseWPF></PropertyGroup>
+  <ItemGroup><ProjectReference Include="../Cap.Core/Cap.Core.csproj" /><ProjectReference Include="../Cap.Capture/Cap.Capture.csproj" /></ItemGroup>
+  <ItemGroup><Compile Include="../Shared/VectorIcon.cs" Link="Visuals/VectorIcon.cs" /></ItemGroup>
+</Project>
