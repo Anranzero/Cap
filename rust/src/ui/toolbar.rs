@@ -3,7 +3,7 @@ use super::{
     runtime::{self, WindowHandler, WindowOptions},
     selector::buffer::PaintBuffer,
 };
-use cap_rust::{selection::CaptureMode, settings::Theme};
+use cap_rust::{annotation::Effect, selection::CaptureMode, settings::Theme};
 use std::{cell::RefCell, rc::Rc};
 use windows::Win32::{
     Foundation::*,
@@ -170,6 +170,9 @@ pub const CMD_CROP: usize = 20;
 pub const CMD_OCR: usize = 21;
 pub const CMD_AUTOSCROLL: usize = 22;
 pub const CMD_CONFIRM: usize = 23;
+pub const EFFECT_BASE: usize = 300;
+/// Opens the text size dropdown (Feishu 12pt menu).
+pub const CMD_SIZE_MENU: usize = 320;
 pub const COLOR_BASE: usize = 100;
 pub const WIDTH_BASE: usize = 200;
 /// Feishu's seven-colour swatches, stored BGRA like the rest of the UI layer.
@@ -218,6 +221,7 @@ pub struct ToolbarState {
     pub tool: Tool,
     pub mode: CaptureMode,
     pub theme: Theme,
+    pub effect: Effect,
     pub color: [u8; 4],
     pub width: u32,
     pub can_undo: bool,
@@ -229,6 +233,7 @@ impl Default for ToolbarState {
             tool: Tool::Select,
             mode: CaptureMode::Screenshot,
             theme: Theme::Dark,
+            effect: Effect::Pixelate,
             color: COLORS[0],
             width: 3,
             can_undo: false,

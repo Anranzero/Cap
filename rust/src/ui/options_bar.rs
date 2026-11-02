@@ -23,25 +23,41 @@ const PILL_TOP: i32 = 8;
 const PILL_HEIGHT: i32 = 54;
 const PADDING: i32 = 10;
 const DOT_CELL: i32 = 34;
-const SIZE_CELL: i32 = 46;
 const SLIDER_CELL: i32 = 226;
 const SEPARATOR: i32 = 17;
 const SWATCH: i32 = 27;
 const SWATCH_CELL: i32 = 34;
 const WIDTHS: [u32; 3] = [2, 3, 6];
 const WIDTH_LABELS: [&str; 3] = ["细", "中", "粗"];
-/// Text presets; the rasterizer maps thickness 2/4/7 to 22/28/37px glyphs.
-const TEXT_SIZES: [u32; 3] = [2, 4, 7];
-const TEXT_LABELS: [&str; 3] = ["小", "中", "大"];
 /// Local x of the caret; the selector offsets this row so the caret lands under the active tool.
 const CARET_X: i32 = 40;
 const COLOUR_NAMES: [&str; 7] = ["红色", "黄色", "绿色", "蓝色", "深灰", "灰色", "白色"];
+/// Feishu mosaic row: 马赛克 / 模糊 / 块状.
+const EFFECT_KINDS: [(&str, &str); 3] = [("▦", "马赛克"), ("◍", "模糊"), ("▩", "块状")];
+/// Feishu text row: a 12pt dropdown with five steps.
+pub const SIZE_PRESETS: [(u32, &str); 5] = [
+    (2, "12pt"),
+    (4, "16pt"),
+    (5, "20pt"),
+    (6, "24pt"),
+    (8, "32pt"),
+];
+
+/// Label of the closest preset for a thickness value.
+pub fn size_label(width: u32) -> &'static str {
+    SIZE_PRESETS
+        .iter()
+        .min_by_key(|(thickness, _)| thickness.abs_diff(width))
+        .map(|(_, label)| *label)
+        .unwrap_or("12pt")
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Zone {
     ColorDot,
     Width(usize),
-    Size(usize),
+    SizeMenu,
+    Effect(usize),
     Slider,
     Swatch(usize),
 }
@@ -49,12 +65,15 @@ enum Zone {
 fn zones(tool: Tool) -> Vec<Zone> {
     let mut out = Vec::new();
     match tool {
-        Tool::Mosaic | Tool::Blur | Tool::Marker => out.push(Zone::Slider),
-        Tool::Text | Tool::Number => {
-            for index in 0..TEXT_SIZES.len() {
-                out.push(Zone::Size(index));
+        // Feishu mosaic row: three effect kinds, then the strength slider.
+        Tool::Mosaic => {
+            for index in 0..EFFECT_KINDS.len() {
+                out.push(Zone::Effect(index));
             }
+            out.push(Zone::Slider);
         }
+        Tool::Blur | Tool::Marker => out.push(Zone::Slider),
+        Tool::Text | Tool::Number => out.push(Zone::SizeMenu),
         _ => {
             // Feishu leads the stroke row with the current colour.
             out.push(Zone::ColorDot);
@@ -72,8 +91,9 @@ fn zones(tool: Tool) -> Vec<Zone> {
 fn zone_width(zone: Zone) -> i32 {
     match zone {
         Zone::ColorDot => 30,
+        Zone::SizeMenu => 82,
+        Zone::Effect(_) => 40,
         Zone::Width(_) => DOT_CELL,
-        Zone::Size(_) => SIZE_CELL,
         Zone::Slider => SLIDER_CELL,
         Zone::Swatch(_) => SWATCH_CELL,
     }
@@ -250,6 +270,11 @@ impl Options {
         } else {
             common::rgb(0xE8, 0xE8, 0xE8)
         };
+        let hover_back = if light {
+            common::rgb(0xF0, 0xED, 0xF2)
+        } else {
+            common::rgb(0x35, 0x35, 0x37)
+        };
         let muted_colour = if light {
             common::rgb(0x64, 0x6A, 0x73)
         } else {
@@ -346,9 +371,36 @@ impl Options {
                         let _ = DeleteObject(brush.into());
                     }
                 }
-                Zone::Size(preset) => {
-                    let selected = state.width == TEXT_SIZES[preset];
+                Zone::Effect(kind) => {
+                    let selected = state.effect == effect_kind(kind);
                     if selected || hovered {
+                        common::rounded(
+                            c.dc,
+                            common::rect(
+                                area.left + 3,
+                                area.top + 10,
+                                area.right - area.left - 6,
+                                34,
+                            ),
+                            if selected { accent } else { hover_back },
+                            8,
+                        );
+                    }
+                    common::text(
+                        c.dc,
+                        EFFECT_KINDS[kind].0,
+                        area,
+                        if selected {
+                            common::rgb(0xFF, 0xFF, 0xFF)
+                        } else {
+                            text_colour
+                        },
+                        (DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX).0,
+                    );
+                }
+                Zone::SizeMenu => {
+                    let selected_or_hover = hovered;
+                    if selected_or_hover {
                         common::rounded(
                             c.dc,
                             common::rect(
@@ -357,23 +409,15 @@ impl Options {
                                 area.right - area.left - 8,
                                 34,
                             ),
-                            if selected {
-                                accent
-                            } else {
-                                common::rgb(0x35, 0x35, 0x37)
-                            },
+                            hover_back,
                             8,
                         );
                     }
                     common::text(
                         c.dc,
-                        TEXT_LABELS[preset],
+                        &format!("{} ▾", size_label(state.width)),
                         area,
-                        if selected {
-                            common::rgb(0xFF, 0xFF, 0xFF)
-                        } else {
-                            text_colour
-                        },
+                        text_colour,
                         (DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX).0,
                     );
                 }
@@ -473,8 +517,9 @@ impl Options {
         let id = match zone {
             // The colour dot is a read-only indicator; clicking it does nothing.
             Zone::ColorDot => return Ok(()),
+            Zone::Effect(kind) => toolbar::EFFECT_BASE + kind,
+            Zone::SizeMenu => toolbar::CMD_SIZE_MENU,
             Zone::Width(dot) => toolbar::WIDTH_BASE + WIDTHS[dot] as usize,
-            Zone::Size(preset) => toolbar::WIDTH_BASE + TEXT_SIZES[preset] as usize,
             Zone::Slider => {
                 let track_left = area.left + 78;
                 let value = ((x - track_left).clamp(0, 108) as u32 * 11 + 54) / 108 + 1;
@@ -495,8 +540,9 @@ impl WindowHandler for Options {
             .map(|(zone, rect)| {
                 let label = match zone {
                     Zone::ColorDot => "当前颜色",
+                    Zone::Effect(kind) => EFFECT_KINDS[kind].1,
+                    Zone::SizeMenu => "字号",
                     Zone::Width(dot) => WIDTH_LABELS[dot],
-                    Zone::Size(preset) => TEXT_LABELS[preset],
                     Zone::Slider => "效果强度",
                     Zone::Swatch(swatch) => COLOUR_NAMES[swatch],
                 };
@@ -559,6 +605,14 @@ impl WindowHandler for Options {
             _ => {}
         }
         Ok(None)
+    }
+}
+
+fn effect_kind(kind: usize) -> cap_rust::annotation::Effect {
+    match kind {
+        0 => cap_rust::annotation::Effect::Pixelate,
+        1 => cap_rust::annotation::Effect::Blur,
+        _ => cap_rust::annotation::Effect::Block,
     }
 }
 

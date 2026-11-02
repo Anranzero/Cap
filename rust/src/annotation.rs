@@ -25,6 +25,8 @@ pub struct Style {
 pub enum Effect {
     Pixelate,
     Blur,
+    /// Coarse square blocks (Feishu 块状).
+    Block,
 }
 #[derive(Clone, Debug)]
 pub enum PaintCommand {
@@ -190,6 +192,7 @@ impl AnnotationDocument {
         match effect {
             Effect::Pixelate => pixelate(&mut frame, amount.saturating_mul(4).max(8))?,
             Effect::Blur => blur(&mut frame, amount.saturating_mul(2).max(3))?,
+            Effect::Block => pixelate(&mut frame, amount.saturating_mul(12).max(16))?,
         }
         Ok(PaintCommand::Stamp {
             origin: Point::new(rect.x as f64, rect.y as f64),

@@ -438,6 +438,29 @@ impl Selector {
             common::invalidate(hwnd);
             return Ok(());
         }
+        if (toolbar::EFFECT_BASE..toolbar::EFFECT_BASE + 3).contains(&id) {
+            self.toolbar.borrow_mut().effect = match id - toolbar::EFFECT_BASE {
+                0 => Effect::Pixelate,
+                1 => Effect::Blur,
+                _ => Effect::Block,
+            };
+            common::invalidate(self.tools_bar);
+            common::invalidate(self.options_bar);
+            return Ok(());
+        }
+        if id == toolbar::CMD_SIZE_MENU {
+            // Interim dropdown behaviour: one button cycles the five Feishu size steps.
+            let width = self.toolbar.borrow().width;
+            let next = options_bar::SIZE_PRESETS
+                .iter()
+                .map(|(thickness, _)| *thickness)
+                .find(|thickness| *thickness > width)
+                .unwrap_or(options_bar::SIZE_PRESETS[0].0);
+            self.toolbar.borrow_mut().width = next;
+            common::invalidate(self.tools_bar);
+            common::invalidate(self.options_bar);
+            return Ok(());
+        }
         if (toolbar::COLOR_BASE..toolbar::COLOR_BASE + toolbar::COLORS.len()).contains(&id) {
             let theme = self.toolbar.borrow().theme;
             let index = id - toolbar::COLOR_BASE;
