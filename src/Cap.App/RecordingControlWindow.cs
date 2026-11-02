@@ -21,6 +21,7 @@ internal sealed class RecordingControlWindow : Window
     private bool paused, stopping;
     private bool closingAllowed;
     private RecordingRegionIndicator? regionIndicator;
+    private PixelRect workArea;
     public event Action<bool>? PauseChanged;
     public event Action? StopRequested;
     public RecordingControlWindow(RecordingOptions options)
@@ -59,17 +60,16 @@ internal sealed class RecordingControlWindow : Window
         SourceInitialized += (_, _) =>
         {
             nint handle = new WindowInteropHelper(this).Handle; CaptureService.ExcludeWindow(handle);
-            PixelRect monitor = CaptureService.GetMonitors().OrderByDescending(m =>
-            {
-                PixelRect overlap = m.Intersect(options.Bounds); return (long)overlap.Width * overlap.Height;
-            }).First();
             var source = HwndSource.FromHwnd(handle); double scale = source?.CompositionTarget?.TransformToDevice.M11 ?? 1;
             int height = (int)Math.Ceiling(Height * scale), width = (int)Math.Ceiling(Width * scale);
-            int x = Math.Clamp(options.Bounds.X, monitor.X, Math.Max(monitor.X, monitor.Right - width));
-            int y = options.Bounds.Bottom + 8;
-            if (y + height > monitor.Bottom || y < monitor.Y) y = options.Bounds.Y - height - 8;
-            y = Math.Clamp(y, monitor.Y + 8, Math.Max(monitor.Y + 8, monitor.Bottom - height - 8));
-            SetWindowPos(handle, 0, x, y, 0, 0, 0x15);
+            // Anchor inside the monitor WORK area: clamping to the full monitor let the bar sit on
+            // the taskbar, where it flickered and clicks landed on the taskbar instead.
+            PixelRect work = WorkArea(options.Bounds);
+            (int x, int y) = RecordingBarPlacement.Place(options.Bounds, work, width, height);
+            // HWND_TOPMOST keeps the bar above the taskbar; SWP_NOSIZE | SWP_NOACTIVATE.
+            SetWindowPos(handle, -1, x, y, 0, 0, 0x15);
+            workArea = work;
+            LocationChanged += (_, _) => ClampOnScreen();
             if (!RecordingSession.UsesDirectRegionCapture(options)) return;
             regionIndicator ??= new RecordingRegionIndicator(options.Bounds);
             regionIndicator.Show();
@@ -77,6 +77,35 @@ internal sealed class RecordingControlWindow : Window
         Closing += (_, e) => { if (!closingAllowed) { e.Cancel = true; RequestStop(); } };
         Closed += (_, _) => { regionIndicator?.Dispose(); regionIndicator = null; };
     }
+    /// <summary>Keeps the control bar inside the monitor work area after the user drags it.</summary>
+    private void ClampOnScreen()
+    {
+        var source = HwndSource.FromHwnd(new WindowInteropHelper(this).Handle);
+        double scale = source?.CompositionTarget?.TransformToDevice.M11 ?? 1;
+        int width = (int)Math.Ceiling(ActualWidth * scale), height = (int)Math.Ceiling(ActualHeight * scale);
+        if (width <= 0 || height <= 0 || workArea.Width <= 0) return;
+        nint handle = new WindowInteropHelper(this).Handle;
+        GetWindowRect(handle, out RECT current);
+        int x = Math.Clamp(current.Left, workArea.X, Math.Max(workArea.X, workArea.Right - width));
+        int y = Math.Clamp(current.Top, workArea.Y, Math.Max(workArea.Y, workArea.Bottom - height));
+        if (x != current.Left || y != current.Top) SetWindowPos(handle, -1, x, y, 0, 0, 0x15);
+    }
+
+    /// <summary>Work area (taskbar excluded) of the monitor with the largest overlap.</summary>
+    private static PixelRect WorkArea(PixelRect bounds)
+    {
+        RECT rect = UnsafeBounds(bounds);
+        nint monitor = MonitorFromRect(ref rect, 2); // MONITOR_DEFAULTTONEAREST
+        var info = new MONITORINFO { cbSize = Marshal.SizeOf<MONITORINFO>() };
+        if (monitor == 0 || !GetMonitorInfo(monitor, ref info))
+            return new PixelRect(bounds.X, bounds.Y, bounds.Width, bounds.Height);
+        RECT work = info.rcWork;
+        return new PixelRect(work.Left, work.Top, work.Right - work.Left, work.Bottom - work.Top);
+    }
+
+    private static RECT UnsafeBounds(PixelRect bounds) =>
+        new() { Left = bounds.X, Top = bounds.Y, Right = bounds.Right, Bottom = bounds.Bottom };
+
     private void MoveControl(object sender, MouseButtonEventArgs e)
     {
         if (e.ButtonState == MouseButtonState.Pressed) DragMove();
@@ -114,4 +143,9 @@ internal sealed class RecordingControlWindow : Window
     }
     public void CloseAfterStop() { closingAllowed = true; Close(); }
     [DllImport("user32.dll")] private static extern bool SetWindowPos(nint hwnd, nint insertAfter, int x, int y, int cx, int cy, uint flags);
+    [DllImport("user32.dll")] private static extern nint MonitorFromRect(ref RECT rect, uint flags);
+    [DllImport("user32.dll")] private static extern bool GetMonitorInfo(nint monitor, ref MONITORINFO info);
+    [DllImport("user32.dll")] private static extern bool GetWindowRect(nint hwnd, out RECT rect);
+    [StructLayout(LayoutKind.Sequential)] private struct RECT { internal int Left, Top, Right, Bottom; }
+    [StructLayout(LayoutKind.Sequential)] private struct MONITORINFO { internal int cbSize; internal RECT rcMonitor; internal RECT rcWork; internal int dwFlags; }
 }

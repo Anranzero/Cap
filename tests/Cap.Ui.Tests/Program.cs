@@ -39,8 +39,8 @@ internal static class Program
         {
             AppAssembly.GetType("Cap.App.App")!.GetMethod("CreateTray", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(app, null);
             var tray = (System.Windows.Forms.NotifyIcon)AppAssembly.GetType("Cap.App.App")!.GetField("tray", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(app)!;
-            if (!tray.ContextMenuStrip!.Items.Cast<System.Windows.Forms.ToolStripItem>().Select(item => item.Text).SequenceEqual(new[] { "截屏", "录制", "设置", "退出" }))
-                throw new Exception("Tray must expose exactly 截屏 / 录制 / 设置 / 退出.");
+            if (!tray.ContextMenuStrip!.Items.Cast<System.Windows.Forms.ToolStripItem>().Select(item => item.Text).SequenceEqual(new[] { "截屏", "录制", "重新注册快捷键", "设置", "退出" }))
+                throw new Exception("Tray must expose exactly 截屏 / 录制 / 重新注册快捷键 / 设置 / 退出.");
             foreach (bool dark in new[] { false, true })
             {
                 string theme = dark ? "dark" : "light";

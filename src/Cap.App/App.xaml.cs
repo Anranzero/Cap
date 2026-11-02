@@ -47,7 +47,12 @@ public partial class App : Application
         CreateTray();
         hotkeys = new HotkeyService(); hotkeys.Activated += command => _ = ExecuteAsync(command);
         hotkeys.CaptureGesture = gesture => settingsWindow?.CaptureHotkey(gesture) == true;
-        if (!hotkeys.TryRegister(settings, out string? error)) Notify("快捷键注册失败", error ?? "请在设置中更换快捷键。");
+        if (!hotkeys.TryRegister(settings, out string? error))
+        {
+            // A silent toast is easy to miss; keep the state visible in the tray until fixed.
+            Notify("快捷键注册失败", error ?? "请在设置中更换快捷键。");
+            if (tray != null) tray.Text = "cap · 快捷键不可用（托盘右键可重试）";
+        }
         if (store.LoadWarning != null) Notify("设置已重置", store.LoadWarning);
         if (settings.RunAtStartup) { try { StartupService.SetEnabled(true); } catch (Exception ex) { AppLog.Error(ex); Notify("自启动未更新", ex.Message); } }
         if (e.Args.Contains("--settings")) ShowSettings();
@@ -57,10 +62,25 @@ public partial class App : Application
         var menu = new Forms.ContextMenuStrip();
         menu.Items.Add("截屏", null, (_, _) => _ = ExecuteAsync(AppCommand.Screenshot));
         menu.Items.Add("录制", null, (_, _) => _ = ExecuteAsync(AppCommand.Recording));
+        menu.Items.Add("重新注册快捷键", null, (_, _) => RetryHotkeys());
         menu.Items.Add("设置", null, (_, _) => ShowSettings());
         menu.Items.Add("退出", null, (_, _) => _ = ExitAsync());
         tray = new Forms.NotifyIcon { Text = "cap · 截图 / 录屏", Icon = TrayIcon.Create(), ContextMenuStrip = menu, Visible = true };
         tray.DoubleClick += (_, _) => _ = ExecuteAsync(AppCommand.Screenshot);
+    }
+    /// <summary>Retries hotkey registration, e.g. after another app released the combination.</summary>
+    private void RetryHotkeys()
+    {
+        if (hotkeys == null) return;
+        if (hotkeys.TryRegister(settings, out string? error))
+        {
+            if (tray != null) tray.Text = "cap · 截图 / 录屏";
+            Notify("快捷键已恢复", "截图 / 录制快捷键现在可以正常使用。");
+        }
+        else
+        {
+            Notify("仍然失败", error ?? "请在设置中更换快捷键。");
+        }
     }
     private async Task ExecuteAsync(AppCommand command)
     {

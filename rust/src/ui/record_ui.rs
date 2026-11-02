@@ -91,27 +91,46 @@ impl Drop for PhysicalDpi {
     }
 }
 
+/// Work area of the monitor holding the recording region (taskbar excluded).
+fn work_area(bounds: Rect) -> Result<RECT, String> {
+    let center = POINT {
+        x: bounds.x + bounds.width as i32 / 2,
+        y: bounds.y + bounds.height as i32 / 2,
+    };
+    let monitor = unsafe { MonitorFromPoint(center, MONITOR_DEFAULTTONEAREST) };
+    let mut info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    if !unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool() {
+        return Err("无法读取录制控制条所在显示器。".into());
+    }
+    Ok(info.rcWork)
+}
+
 fn control_position(bounds: Rect) -> Result<RECT, String> {
-    let monitors = capture::monitors()?;
-    let monitor = monitors
-        .iter()
-        .max_by_key(|m| {
-            let r = m.bounds.intersect(bounds);
-            r.width as u64 * r.height as u64
-        })
-        .ok_or("没有可用显示器。")?
-        .bounds;
+    // Clamping to the full monitor let the bar sit on the taskbar, where it flickered and
+    // clicks were swallowed; anchor inside the work area instead.
+    let work = work_area(bounds)?;
+    let below = bounds.bottom() as i64 + 8;
+    let above = bounds.y as i64 - BAR_HEIGHT as i64 - 8;
+    let top = work.top.saturating_add(8);
+    let bottom = work.bottom.saturating_sub(BAR_HEIGHT + 8).max(top);
+    // Full-height regions have no room above or below: hug the bottom of the work area,
+    // centred on the recording (Feishu's placement), never on the taskbar.
+    if below + BAR_HEIGHT as i64 > work.bottom as i64 && above < work.top as i64 {
+        let centred = bounds.x + (bounds.width as i32 - BAR_WIDTH) / 2;
+        let x = centred.clamp(work.left, (work.right - BAR_WIDTH).max(work.left));
+        return Ok(common::rect(x, bottom, BAR_WIDTH, BAR_HEIGHT));
+    }
     let x = bounds
         .x
-        .clamp(monitor.x, (monitor.right() - BAR_WIDTH).max(monitor.x));
-    let below = bounds.bottom() as i64 + 8;
-    let desired_y = if below + BAR_HEIGHT as i64 <= monitor.bottom() as i64 {
+        .clamp(work.left, (work.right - BAR_WIDTH).max(work.left));
+    let desired_y = if below + BAR_HEIGHT as i64 <= work.bottom as i64 {
         below
     } else {
-        bounds.y as i64 - BAR_HEIGHT as i64 - 8
+        above
     };
-    let top = monitor.y.saturating_add(8);
-    let bottom = monitor.bottom().saturating_sub(BAR_HEIGHT + 8).max(top);
     Ok(common::rect(
         x,
         desired_y.clamp(top as i64, bottom as i64) as i32,
