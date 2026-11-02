@@ -69,11 +69,21 @@ impl Mp4Writer {
         let p = wide(path);
         (|| -> windows::core::Result<Self> {
             unsafe {
-                let writer = MFCreateSinkWriterFromURL(PCWSTR(p.as_ptr()), None, None)?;
+                // Ask Media Foundation for a hardware H.264 MFT first (NVENC/QSV/AMF); it falls
+                // back to the inbox software encoder automatically when none is available.
+                let mut attributes: Option<IMFAttributes> = None;
+                MFCreateAttributes(&mut attributes, 1)?;
+                let attributes = attributes.ok_or_else(|| {
+                    windows::core::Error::from(windows::Win32::Foundation::E_OUTOFMEMORY)
+                })?;
+                attributes.SetUINT32(&MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 1)?;
+                let writer =
+                    MFCreateSinkWriterFromURL(PCWSTR(p.as_ptr()), None, Some(&attributes))?;
                 let output = video_type(&MFVideoFormat_H264, width, height, fps)?;
+                // Screen content compresses well; a lower bitrate keeps 60 fps encodes fast.
                 output.SetUINT32(
                     &MF_MT_AVG_BITRATE,
-                    ((width as u64 * height as u64 * fps as u64 / 5).clamp(600_000, 40_000_000))
+                    ((width as u64 * height as u64 * fps as u64 / 10).clamp(600_000, 30_000_000))
                         as u32,
                 )?;
                 let stream = writer.AddStream(&output)?;
