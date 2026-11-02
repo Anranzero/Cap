@@ -24,7 +24,7 @@ const PILL_HEIGHT: i32 = 54;
 const PADDING: i32 = 10;
 const DOT_CELL: i32 = 34;
 const SIZE_CELL: i32 = 46;
-const SLIDER_CELL: i32 = 196;
+const SLIDER_CELL: i32 = 226;
 const SEPARATOR: i32 = 17;
 const SWATCH: i32 = 27;
 const SWATCH_CELL: i32 = 34;
@@ -39,6 +39,7 @@ const COLOUR_NAMES: [&str; 7] = ["红色", "黄色", "绿色", "蓝色", "深灰
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Zone {
+    ColorDot,
     Width(usize),
     Size(usize),
     Slider,
@@ -48,13 +49,15 @@ enum Zone {
 fn zones(tool: Tool) -> Vec<Zone> {
     let mut out = Vec::new();
     match tool {
-        Tool::Mosaic | Tool::Blur => out.push(Zone::Slider),
+        Tool::Mosaic | Tool::Blur | Tool::Marker => out.push(Zone::Slider),
         Tool::Text | Tool::Number => {
             for index in 0..TEXT_SIZES.len() {
                 out.push(Zone::Size(index));
             }
         }
         _ => {
+            // Feishu leads the stroke row with the current colour.
+            out.push(Zone::ColorDot);
             for index in 0..WIDTHS.len() {
                 out.push(Zone::Width(index));
             }
@@ -68,6 +71,7 @@ fn zones(tool: Tool) -> Vec<Zone> {
 
 fn zone_width(zone: Zone) -> i32 {
     match zone {
+        Zone::ColorDot => 30,
         Zone::Width(_) => DOT_CELL,
         Zone::Size(_) => SIZE_CELL,
         Zone::Slider => SLIDER_CELL,
@@ -288,6 +292,31 @@ impl Options {
         for (index, (zone, area)) in zone_rects(state.tool).into_iter().enumerate() {
             let hovered = self.hover == Some(index);
             match zone {
+                Zone::ColorDot => {
+                    let color = state.color;
+                    let centre = (
+                        area.left + (area.right - area.left) / 2,
+                        area.top + (area.bottom - area.top) / 2,
+                    );
+                    unsafe {
+                        let brush =
+                            CreateSolidBrush(COLORREF(common::rgb(color[2], color[1], color[0])));
+                        let previous = SelectObject(c.dc, brush.into());
+                        // Hollow ring: a darker inner circle keeps the dot readable on light bars.
+                        let pen = CreatePen(
+                            PS_SOLID,
+                            2,
+                            COLORREF(common::rgb(color[2], color[1], color[0])),
+                        );
+                        let old_pen = SelectObject(c.dc, pen.into());
+                        let _ =
+                            Ellipse(c.dc, centre.0 - 9, centre.1 - 9, centre.0 + 9, centre.1 + 9);
+                        SelectObject(c.dc, old_pen);
+                        SelectObject(c.dc, previous);
+                        let _ = DeleteObject(pen.into());
+                        let _ = DeleteObject(brush.into());
+                    }
+                }
                 Zone::Width(dot) => {
                     let diameter = [8, 12, 16][dot];
                     let center = (
@@ -352,11 +381,15 @@ impl Options {
                     let value = state.width.clamp(1, 12) as i32;
                     common::label(
                         c.dc,
-                        "强度",
-                        common::rect(area.left + 8, area.top, 40, PILL_HEIGHT),
+                        if state.tool == Tool::Marker {
+                            "不透明度"
+                        } else {
+                            "模糊强度"
+                        },
+                        common::rect(area.left + 8, area.top, 64, PILL_HEIGHT),
                         muted_colour,
                     );
-                    let track = common::rect(area.left + 50, area.top + 26, 108, 3);
+                    let track = common::rect(area.left + 78, area.top + 26, 108, 3);
                     common::fill(c.dc, track, common::rgb(0x55, 0x55, 0x55));
                     let knob_x = track.left + (track.right - track.left) * (value - 1) / 11;
                     unsafe {
@@ -371,7 +404,7 @@ impl Options {
                     common::label(
                         c.dc,
                         &format!("{}%", value * 8),
-                        common::rect(area.left + 164, area.top, 44, PILL_HEIGHT),
+                        common::rect(area.left + 192, area.top, 44, PILL_HEIGHT),
                         text_colour,
                     );
                 }
@@ -400,6 +433,17 @@ impl Options {
                         let _ = DeleteObject(outline.into());
                     }
                     if selected {
+                        // Feishu marks the selected swatch with a check mark as well as a ring.
+                        unsafe {
+                            let pen =
+                                CreatePen(PS_SOLID, 2, COLORREF(common::rgb(0xFF, 0xFF, 0xFF)));
+                            let previous = SelectObject(c.dc, pen.into());
+                            let _ = MoveToEx(c.dc, tile.left + 6, tile.top + 14, None);
+                            let _ = LineTo(c.dc, tile.left + 11, tile.top + 19);
+                            let _ = LineTo(c.dc, tile.right - 5, tile.top + 8);
+                            SelectObject(c.dc, previous);
+                            let _ = DeleteObject(pen.into());
+                        }
                         let ring = unsafe {
                             CreatePen(PS_SOLID, 2, COLORREF(common::rgb(0xFF, 0xFF, 0xFF)))
                         };
@@ -427,10 +471,12 @@ impl Options {
     }
     fn click(&self, zone: Zone, area: RECT, x: i32) -> Result<(), String> {
         let id = match zone {
+            // The colour dot is a read-only indicator; clicking it does nothing.
+            Zone::ColorDot => return Ok(()),
             Zone::Width(dot) => toolbar::WIDTH_BASE + WIDTHS[dot] as usize,
             Zone::Size(preset) => toolbar::WIDTH_BASE + TEXT_SIZES[preset] as usize,
             Zone::Slider => {
-                let track_left = area.left + 50;
+                let track_left = area.left + 78;
                 let value = ((x - track_left).clamp(0, 108) as u32 * 11 + 54) / 108 + 1;
                 toolbar::WIDTH_BASE + value.clamp(1, 12) as usize
             }
@@ -448,6 +494,7 @@ impl WindowHandler for Options {
             .into_iter()
             .map(|(zone, rect)| {
                 let label = match zone {
+                    Zone::ColorDot => "当前颜色",
                     Zone::Width(dot) => WIDTH_LABELS[dot],
                     Zone::Size(preset) => TEXT_LABELS[preset],
                     Zone::Slider => "效果强度",

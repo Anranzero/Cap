@@ -785,7 +785,8 @@ impl Selector {
                 Tool::Marker => {
                     // Feishu 标注: translucent highlighter (30%) with a broad nib.
                     let mut style = style;
-                    style.color[3] = 77;
+                    // Feishu's 标注 opacity slider drives the highlight alpha (default ~30%).
+                    style.color[3] = (self.toolbar.borrow().width * 8).clamp(8, 96) as u8;
                     style.thickness *= 2.6;
                     Some(PaintCommand::Pen {
                         points: std::mem::take(&mut self.points),

@@ -159,10 +159,19 @@ impl Magnifier {
             "按 Ctrl + C 复制色值".into(),
             "按 Shift 切换 RGB/HEX".into(),
         ];
+        // Feishu prefixes the RGB/HEX row with a swatch of the sampled colour.
         let mut y = ZOOM_HEIGHT + 6;
         for (index, line) in lines.iter().enumerate() {
             let colour = if index < 2 { text_colour } else { hint_colour };
-            common::label(c.dc, line, common::rect(12, y, rect.right - 16, 20), colour);
+            if index == 1 {
+                if let Some([r, g, b]) = state.sample() {
+                    let swatch = common::rect(12, y + 3, 13, 13);
+                    common::rounded(c.dc, swatch, common::rgb(r, g, b), 3);
+                }
+                common::label(c.dc, line, common::rect(32, y, rect.right - 36, 20), colour);
+            } else {
+                common::label(c.dc, line, common::rect(12, y, rect.right - 16, 20), colour);
+            }
             y += 18;
         }
         c.present(canvas.dc)

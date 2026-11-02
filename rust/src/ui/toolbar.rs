@@ -67,12 +67,6 @@ const CELLS: [Cell; 20] = [
         tool: Some(Tool::Number),
     },
     Cell {
-        command: CMD_MARKER,
-        icon: 19,
-        hint: "标注：拖动高亮",
-        tool: Some(Tool::Marker),
-    },
-    Cell {
         command: 8,
         icon: 8,
         hint: "马赛克：拖动框选",
@@ -83,6 +77,12 @@ const CELLS: [Cell; 20] = [
         icon: 9,
         hint: "模糊：拖动框选",
         tool: Some(Tool::Blur),
+    },
+    Cell {
+        command: CMD_MARKER,
+        icon: 19,
+        hint: "标注：拖动高亮",
+        tool: Some(Tool::Marker),
     },
     Cell {
         command: CMD_CROP,
